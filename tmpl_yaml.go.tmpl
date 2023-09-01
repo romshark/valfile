@@ -1,0 +1,26 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/go-playground/validator/v10"
+	"gopkg.in/yaml.v3"
+)
+
+var value {{.TypeDefinition}}
+var input = `{{.Input}}`
+
+func main() {
+	d := yaml.NewDecoder(strings.NewReader(input))
+	d.KnownFields(true)
+	if err := d.Decode(&value); err != nil {
+		fmt.Printf("{{.StdoutOutputPrefix}}%v\n", err)
+		return
+	}
+
+	v := validator.New(validator.WithRequiredStructEnabled())
+	if err := v.Struct(value); err != nil {
+		fmt.Printf("{{.StdoutOutputPrefix}}%v\n", err.Error())
+	}
+}

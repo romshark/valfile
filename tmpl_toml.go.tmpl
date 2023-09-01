@@ -1,0 +1,25 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/BurntSushi/toml"
+	"github.com/go-playground/validator/v10"
+)
+
+var value {{.TypeDefinition}}
+var input = `{{.Input}}`
+
+func main() {
+	d := toml.NewDecoder(strings.NewReader(input))
+	if _, err := d.Decode(&value); err != nil {
+		fmt.Printf("{{.StdoutOutputPrefix}}%v\n", err)
+		return
+	}
+
+	v := validator.New(validator.WithRequiredStructEnabled())
+	if err := v.Struct(value); err != nil {
+		fmt.Printf("{{.StdoutOutputPrefix}}%v\n", err.Error())
+	}
+}

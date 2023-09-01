@@ -1,0 +1,26 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/go-playground/validator/v10"
+)
+
+var value {{.TypeDefinition}}
+var input = `{{.Input}}`
+
+func main() {
+	d := json.NewDecoder(strings.NewReader(input))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&value); err != nil {
+		fmt.Printf("{{.StdoutOutputPrefix}}%v\n", err)
+		return
+	}
+
+	v := validator.New(validator.WithRequiredStructEnabled())
+	if err := v.Struct(value); err != nil {
+		fmt.Printf("{{.StdoutOutputPrefix}}%v\n", err.Error())
+	}
+}
