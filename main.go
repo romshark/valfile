@@ -41,17 +41,17 @@ var vendorYAML []byte
 //go:embed tmpl_gomod_toml.txt
 var gomodTOML []byte
 
-//go:embed tmpl_gosum_toml.txt
-var gosumTOML []byte
-
 //go:embed tmpl_gomod_json.txt
 var gomodJSON []byte
 
-//go:embed tmpl_gosum_json.txt
-var gosumJSON []byte
-
 //go:embed tmpl_gomod_yaml.txt
 var gomodYAML []byte
+
+//go:embed tmpl_gosum_toml.txt
+var gosumTOML []byte
+
+//go:embed tmpl_gosum_json.txt
+var gosumJSON []byte
 
 //go:embed tmpl_gosum_yaml.txt
 var gosumYAML []byte
