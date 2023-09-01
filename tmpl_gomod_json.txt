@@ -1,4 +1,4 @@
-module structcheck
+module valfile
 
 go 1.21.0
 
