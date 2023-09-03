@@ -1,6 +1,9 @@
 # valfile
 
-A CLI tool to statically validate YAML, TOML, JSON and Jsonnet files against a Go `struct` type.
+A CLI tool to statically validate YAML, TOML, JSON, Jsonnet, dotenv files and
+environment variables against a Go `struct` type.
+
+## Usage
 
 The following command will return errors, if file `input-file.toml`
 can't be unmarshaled into type `YourStructType` defined in package `path/to/yourpackage`
@@ -14,6 +17,15 @@ valfile -p path/to/yourpackage -t YourStructType -f input-file.toml
 
 If `input-file.toml` passes the marshaling and validation then
 the above command is a no-op.
+
+### Environment variables
+
+To match environment variables against a Go type, use the `-env` flag.
+Beware that this flag is mutually exclusive with `-f`.
+
+```sh
+FOO=bar BAZZ=fuzz valfile -p path/to/yourpackage -t YourStructType -env
+```
 
 ## Requirements
 
