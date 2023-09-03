@@ -1,0 +1,30 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/caarlos0/env/v9"
+	"github.com/go-playground/validator/v10"
+)
+
+var value {{.TypeDefinition}}
+var input = map[string]string {
+{{- range $key, $value := .Input}}
+   `{{$key}}`: `{{$value}}`,
+{{ end -}}
+}
+
+func main() {
+	if err := env.ParseWithOptions(&value, env.Options{
+		Environment: input,
+	}); err != nil {
+		reportError(err.Error())
+		return
+	}
+	{{template "validate"}}
+}
+
+func reportError(msg string) {
+	fmt.Printf("{{.StdoutErrPrefix}}%v\n", msg)
+}
