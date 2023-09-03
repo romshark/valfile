@@ -14,12 +14,12 @@ var input = `{{.Input}}`
 func main() {
 	d := toml.NewDecoder(strings.NewReader(input))
 	if _, err := d.Decode(&value); err != nil {
-		fmt.Printf("{{.StdoutOutputPrefix}}%v\n", err)
+		reportError(err.Error())
 		return
 	}
+	{{template "validate"}}
+}
 
-	v := validator.New(validator.WithRequiredStructEnabled())
-	if err := v.Struct(value); err != nil {
-		fmt.Printf("{{.StdoutOutputPrefix}}%v\n", err.Error())
-	}
+func reportError(msg string) {
+	fmt.Printf("{{.StdoutErrPrefix}}%v\n", msg)
 }

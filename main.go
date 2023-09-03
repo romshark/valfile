@@ -29,6 +29,9 @@ var tmplSrcJSON string
 //go:embed tmpl_yaml.go.tmpl
 var tmplSrcYAML string
 
+//go:embed tmpl_validate.go.tmpl
+var tmplSrcValidate string
+
 //go:embed vendor_toml.zip
 var vendorTOML []byte
 
@@ -57,12 +60,23 @@ var gosumJSON []byte
 var gosumYAML []byte
 
 var (
-	tmplTOML = template.Must(template.New("main").Parse(tmplSrcTOML))
-	tmplJSON = template.Must(template.New("main").Parse(tmplSrcJSON))
-	tmplYAML = template.Must(template.New("main").Parse(tmplSrcYAML))
+	tmplValidate = template.Must(template.New("validate").Parse(tmplSrcValidate))
+	tmplTOML     = withTmpl("main_toml", tmplSrcTOML, tmplValidate)
+	tmplJSON     = withTmpl("main_json", tmplSrcJSON, tmplValidate)
+	tmplYAML     = withTmpl("main_yaml", tmplSrcYAML, tmplValidate)
 )
 
-const StdoutOutputPrefix = "VALFILE: "
+func withTmpl(name, src string, t ...*template.Template) *template.Template {
+	tmpl := template.Must(template.New(name).Parse(src))
+	for _, t := range t {
+		if _, err := tmpl.New(t.Name()).Parse(tmplSrcValidate); err != nil {
+			panic(err)
+		}
+	}
+	return tmpl
+}
+
+const StdoutErrPrefix = "VALFILE: "
 
 func main() {
 	packageDir := flag.String("p", ".", "package directory path")
@@ -95,8 +109,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
-	if bytes.HasPrefix(output, []byte(StdoutOutputPrefix)) {
-		msg := output[len(StdoutOutputPrefix):]
+	if bytes.HasPrefix(output, []byte(StdoutErrPrefix)) {
+		msg := output[len(StdoutErrPrefix):]
 		_, _ = os.Stdout.Write(msg)
 		os.Exit(1)
 	}
@@ -194,13 +208,13 @@ func run(
 func mustRenderSrc(typeDefinition, input string, tmpl *template.Template) []byte {
 	b := new(bytes.Buffer)
 	if err := tmpl.Execute(b, struct {
-		TypeDefinition     string
-		Input              string
-		StdoutOutputPrefix string
+		TypeDefinition  string
+		Input           string
+		StdoutErrPrefix string
 	}{
-		TypeDefinition:     typeDefinition,
-		Input:              input,
-		StdoutOutputPrefix: StdoutOutputPrefix,
+		TypeDefinition:  typeDefinition,
+		Input:           input,
+		StdoutErrPrefix: StdoutErrPrefix,
 	}); err != nil {
 		panic(fmt.Errorf("executing template: %w", err))
 	}

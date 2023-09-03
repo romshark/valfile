@@ -1,0 +1,17 @@
+defer func() {
+    err := recover()
+    switch err := err.(type) {
+    case nil:
+        return
+    case string:
+        if strings.HasPrefix(err, "Undefined validation function") {
+            reportError(err)
+            return
+        }
+    }
+    panic(err)
+}()
+v := validator.New(validator.WithRequiredStructEnabled())
+if err := v.Struct(value); err != nil {
+    reportError(err.Error())
+}
