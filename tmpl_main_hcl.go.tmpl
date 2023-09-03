@@ -1,0 +1,24 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/go-playground/validator/v10"
+	"github.com/hashicorp/hcl/v2/hclsimple"
+)
+
+var value {{.TypeDefinition}}
+var input = []byte(`{{.Input}}`)
+
+func main() {
+	if err := hclsimple.Decode("{{.InputFileName}}", input, nil, &value); err != nil {
+		reportError(err.Error())
+		return
+	}
+	{{template "validate"}}
+}
+
+func reportError(msg string) {
+	fmt.Printf("{{.StdoutErrPrefix}}%v\n", msg)
+}

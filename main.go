@@ -34,6 +34,9 @@ var tmplMainJSON string
 //go:embed tmpl_main_yaml.go.tmpl
 var tmplMainYAML string
 
+//go:embed tmpl_main_hcl.go.tmpl
+var tmplMainHCL string
+
 //go:embed tmpl_validate.go.tmpl
 var tmplSrcValidate string
 
@@ -49,6 +52,9 @@ var vendorJSON []byte
 //go:embed vendor_yaml.zip
 var vendorYAML []byte
 
+//go:embed vendor_hcl.zip
+var vendorHCL []byte
+
 //go:embed tmpl_gomod_env.txt
 var gomodENV []byte
 
@@ -60,6 +66,9 @@ var gomodJSON []byte
 
 //go:embed tmpl_gomod_yaml.txt
 var gomodYAML []byte
+
+//go:embed tmpl_gomod_hcl.txt
+var gomodHCL []byte
 
 //go:embed tmpl_gosum_env.txt
 var gosumENV []byte
@@ -73,11 +82,15 @@ var gosumJSON []byte
 //go:embed tmpl_gosum_yaml.txt
 var gosumYAML []byte
 
+//go:embed tmpl_gosum_hcl.txt
+var gosumHCL []byte
+
 var (
 	tmplValidate = template.Must(template.New("validate").Parse(tmplSrcValidate))
 	tmplTOML     = withTmpl("main_toml", tmplMainTOML, tmplValidate)
 	tmplJSON     = withTmpl("main_json", tmplMainJSON, tmplValidate)
 	tmplYAML     = withTmpl("main_yaml", tmplMainYAML, tmplValidate)
+	tmplHCL      = withTmpl("main_hcl", tmplMainHCL, tmplValidate)
 	tmplENV      = withTmpl("main_env", tmplMainENV, tmplValidate)
 )
 
@@ -151,17 +164,19 @@ func run(
 		return nil, fmt.Errorf("type %s not found in package %s", typeName, packageName)
 	}
 
-	typeRendered, err := renderGoType(typeDefObj, fset)
+	typeStr, err := renderGoType(typeDefObj, fset)
 	if err != nil {
 		return nil, fmt.Errorf("rendering go type: %w", err)
 	}
+
+	fileName := filepath.Base(inputFile)
 
 	// Write format-specific executable to temporary file
 	var source, goMod, goSum, vendorArchive []byte
 	switch inputType {
 	case InputTypeENV:
 		m := envToMap(os.Environ())
-		source = mustRenderSrcEnv(typeRendered, m)
+		source = mustRenderSrcEnv(typeStr, m)
 		goMod, goSum, vendorArchive = gomodENV, gosumENV, vendorENV
 	case InputTypeDOTENV:
 		f, err := os.OpenFile(inputFile, os.O_RDONLY, 0o644)
@@ -172,28 +187,28 @@ func run(
 		if err != nil {
 			return nil, fmt.Errorf("parsing dotenv file: %w", err)
 		}
-		source = mustRenderSrcEnv(typeRendered, m)
+		source = mustRenderSrcEnv(typeStr, m)
 		goMod, goSum, vendorArchive = gomodENV, gosumENV, vendorENV
 	case InputTypeTOML:
 		inputFileContents, err := os.ReadFile(inputFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading input file: %w", err)
 		}
-		source = mustRenderSrc(typeRendered, string(inputFileContents), tmplTOML)
+		source = mustRenderSrc(typeStr, string(inputFileContents), fileName, tmplTOML)
 		goMod, goSum, vendorArchive = gomodTOML, gosumTOML, vendorTOML
 	case InputTypeJSON:
 		inputFileContents, err := os.ReadFile(inputFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading input file: %w", err)
 		}
-		source = mustRenderSrc(typeRendered, string(inputFileContents), tmplJSON)
+		source = mustRenderSrc(typeStr, string(inputFileContents), fileName, tmplJSON)
 		goMod, goSum, vendorArchive = gomodJSON, gosumJSON, vendorJSON
 	case InputTypeYAML:
 		inputFileContents, err := os.ReadFile(inputFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading input file: %w", err)
 		}
-		source = mustRenderSrc(typeRendered, string(inputFileContents), tmplYAML)
+		source = mustRenderSrc(typeStr, string(inputFileContents), fileName, tmplYAML)
 		goMod, goSum, vendorArchive = gomodYAML, gosumYAML, vendorYAML
 	case InputTypeJSONNET:
 		vm := jsonnet.MakeVM()
@@ -201,8 +216,15 @@ func run(
 		if err != nil {
 			return nil, fmt.Errorf("evaluating Jsonnet: %w", err)
 		}
-		source = mustRenderSrc(typeRendered, rendered, tmplJSON)
+		source = mustRenderSrc(typeStr, rendered, fileName, tmplJSON)
 		goMod, goSum, vendorArchive = gomodJSON, gosumJSON, vendorJSON
+	case InputTypeHCL:
+		inputFileContents, err := os.ReadFile(inputFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading input file: %w", err)
+		}
+		source = mustRenderSrc(typeStr, string(inputFileContents), fileName, tmplHCL)
+		goMod, goSum, vendorArchive = gomodHCL, gosumHCL, vendorHCL
 	}
 
 	tempDir, err := os.MkdirTemp(os.TempDir(), "valfile-*")
@@ -240,15 +262,20 @@ func run(
 	return cmd.CombinedOutput()
 }
 
-func mustRenderSrc(typeDefinition, input string, tmpl *template.Template) []byte {
+func mustRenderSrc(
+	typeDefinition, input, fileName string,
+	tmpl *template.Template,
+) []byte {
 	b := new(bytes.Buffer)
 	if err := tmpl.Execute(b, struct {
 		TypeDefinition  string
 		Input           string
+		InputFileName   string
 		StdoutErrPrefix string
 	}{
 		TypeDefinition:  typeDefinition,
 		Input:           input,
+		InputFileName:   fileName,
 		StdoutErrPrefix: StdoutErrPrefix,
 	}); err != nil {
 		panic(fmt.Errorf("executing template: %w", err))
@@ -395,6 +422,7 @@ const (
 	InputTypeYAML
 	InputTypeENV
 	InputTypeDOTENV
+	InputTypeHCL
 )
 
 func getFileFormat(filePath string) (InputType, error) {
@@ -408,6 +436,8 @@ func getFileFormat(filePath string) (InputType, error) {
 		return InputTypeJSONNET, nil
 	case ".yaml", ".yml":
 		return InputTypeYAML, nil
+	case ".hcl":
+		return InputTypeHCL, nil
 	}
 	fileName := filepath.Base(filePath)
 	if regexEnvFile.MatchString(fileName) {
