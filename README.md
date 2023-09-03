@@ -1,6 +1,6 @@
 # valfile
 
-A CLI tool to statically validate YAML, TOML, JSON, Jsonnet, dotenv files and
+A CLI tool to statically validate YAML, TOML, JSON, Jsonnet, HCL, dotenv files and
 environment variables against a Go `struct` type.
 
 ## Usage
