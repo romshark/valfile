@@ -156,18 +156,41 @@ func run(
 	inputType InputType,
 ) (output []byte, err error) {
 	fset := token.NewFileSet()
-	packageName, typeDefObj, err := findType(typeName, packageDir, fset)
+
+	pkg, err := parsePackage(fset, packageDir)
 	if err != nil {
 		return nil, err
 	}
-	if typeDefObj == nil {
-		return nil, fmt.Errorf("type %s not found in package %s", typeName, packageName)
+
+	rootType := findType(fset, pkg, typeName)
+	if rootType == nil {
+		return nil, fmt.Errorf("type %s not found in package %s", typeName, pkg.Name)
 	}
 
-	typeStr, err := renderGoType(typeDefObj, fset)
+	typeStr, err := renderGoType(rootType, fset)
 	if err != nil {
-		return nil, fmt.Errorf("rendering go type: %w", err)
+		panic(fmt.Errorf("rendering go type: %w", err))
 	}
+	typeDefinitions := []string{typeStr}
+	registry := map[string]struct{}{
+		typeName: {},
+	}
+
+	traverseTypeIdents(fset, pkg, rootType.Type, func(i *ast.Ident) {
+		if isTypePrimitive(i.Name) {
+			return
+		}
+		t := findType(fset, pkg, i.Name)
+		if _, ok := registry[t.Name.Name]; ok {
+			return
+		}
+		r, err := renderGoType(t, fset)
+		if err != nil {
+			panic(fmt.Errorf("rendering go type: %w", err))
+		}
+		registry[t.Name.Name] = struct{}{}
+		typeDefinitions = append(typeDefinitions, r)
+	})
 
 	fileName := filepath.Base(inputFile)
 
@@ -176,7 +199,7 @@ func run(
 	switch inputType {
 	case InputTypeENV:
 		m := envToMap(os.Environ())
-		source = mustRenderSrcEnv(typeStr, m)
+		source = mustRenderSrcEnv(typeDefinitions, typeName, m)
 		goMod, goSum, vendorArchive = gomodENV, gosumENV, vendorENV
 	case InputTypeDOTENV:
 		f, err := os.OpenFile(inputFile, os.O_RDONLY, 0o644)
@@ -187,28 +210,34 @@ func run(
 		if err != nil {
 			return nil, fmt.Errorf("parsing dotenv file: %w", err)
 		}
-		source = mustRenderSrcEnv(typeStr, m)
+		source = mustRenderSrcEnv(typeDefinitions, typeName, m)
 		goMod, goSum, vendorArchive = gomodENV, gosumENV, vendorENV
 	case InputTypeTOML:
 		inputFileContents, err := os.ReadFile(inputFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading input file: %w", err)
 		}
-		source = mustRenderSrc(typeStr, string(inputFileContents), fileName, tmplTOML)
+		source = mustRenderSrc(
+			typeDefinitions, typeName, string(inputFileContents), fileName, tmplTOML,
+		)
 		goMod, goSum, vendorArchive = gomodTOML, gosumTOML, vendorTOML
 	case InputTypeJSON:
 		inputFileContents, err := os.ReadFile(inputFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading input file: %w", err)
 		}
-		source = mustRenderSrc(typeStr, string(inputFileContents), fileName, tmplJSON)
+		source = mustRenderSrc(
+			typeDefinitions, typeName, string(inputFileContents), fileName, tmplJSON,
+		)
 		goMod, goSum, vendorArchive = gomodJSON, gosumJSON, vendorJSON
 	case InputTypeYAML:
 		inputFileContents, err := os.ReadFile(inputFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading input file: %w", err)
 		}
-		source = mustRenderSrc(typeStr, string(inputFileContents), fileName, tmplYAML)
+		source = mustRenderSrc(
+			typeDefinitions, typeName, string(inputFileContents), fileName, tmplYAML,
+		)
 		goMod, goSum, vendorArchive = gomodYAML, gosumYAML, vendorYAML
 	case InputTypeJSONNET:
 		vm := jsonnet.MakeVM()
@@ -216,14 +245,18 @@ func run(
 		if err != nil {
 			return nil, fmt.Errorf("evaluating Jsonnet: %w", err)
 		}
-		source = mustRenderSrc(typeStr, rendered, fileName, tmplJSON)
+		source = mustRenderSrc(
+			typeDefinitions, typeName, rendered, fileName, tmplJSON,
+		)
 		goMod, goSum, vendorArchive = gomodJSON, gosumJSON, vendorJSON
 	case InputTypeHCL:
 		inputFileContents, err := os.ReadFile(inputFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading input file: %w", err)
 		}
-		source = mustRenderSrc(typeStr, string(inputFileContents), fileName, tmplHCL)
+		source = mustRenderSrc(
+			typeDefinitions, typeName, string(inputFileContents), fileName, tmplHCL,
+		)
 		goMod, goSum, vendorArchive = gomodHCL, gosumHCL, vendorHCL
 	}
 
@@ -263,17 +296,20 @@ func run(
 }
 
 func mustRenderSrc(
-	typeDefinition, input, fileName string,
+	typeDefinitions []string,
+	rootTypeName, input, fileName string,
 	tmpl *template.Template,
 ) []byte {
 	b := new(bytes.Buffer)
 	if err := tmpl.Execute(b, struct {
-		TypeDefinition  string
+		TypeDefinitions []string
+		RootTypeName    string
 		Input           string
 		InputFileName   string
 		StdoutErrPrefix string
 	}{
-		TypeDefinition:  typeDefinition,
+		TypeDefinitions: typeDefinitions,
+		RootTypeName:    rootTypeName,
 		Input:           input,
 		InputFileName:   fileName,
 		StdoutErrPrefix: StdoutErrPrefix,
@@ -283,14 +319,20 @@ func mustRenderSrc(
 	return b.Bytes()
 }
 
-func mustRenderSrcEnv(typeDefinition string, input map[string]string) []byte {
+func mustRenderSrcEnv(
+	typeDefinitions []string,
+	rootTypeName string,
+	input map[string]string,
+) []byte {
 	b := new(bytes.Buffer)
 	if err := tmplENV.Execute(b, struct {
-		TypeDefinition  string
+		TypeDefinitions []string
+		RootTypeName    string
 		Input           map[string]string
 		StdoutErrPrefix string
 	}{
-		TypeDefinition:  typeDefinition,
+		TypeDefinitions: typeDefinitions,
+		RootTypeName:    rootTypeName,
 		Input:           input,
 		StdoutErrPrefix: StdoutErrPrefix,
 	}); err != nil {
@@ -299,24 +341,25 @@ func mustRenderSrcEnv(typeDefinition string, input map[string]string) []byte {
 	return b.Bytes()
 }
 
-func findType(
-	typeName string,
-	packageDir string,
-	fset *token.FileSet,
-) (packageName string, obj *ast.StructType, err error) {
-	pkgs, err := parser.ParseDir(fset, packageDir, nil, parser.AllErrors)
+func parsePackage(fset *token.FileSet, packageDirPath string) (*ast.Package, error) {
+	pkgs, err := parser.ParseDir(fset, packageDirPath, nil, parser.AllErrors)
 	if err != nil {
-		return "", nil, fmt.Errorf("parsing package:\n%s", err.Error())
+		return nil, fmt.Errorf("parsing package: %s", err.Error())
 	}
-
 	if len(pkgs) != 1 {
 		panic(fmt.Errorf("expected 1 package, received: %d", len(pkgs)))
 	}
-	var pkg *ast.Package
 	for k := range pkgs {
-		pkg, packageName = pkgs[k], k
-		break
+		return pkgs[k], nil
 	}
+	return nil, nil
+}
+
+func findType(
+	fset *token.FileSet,
+	pkg *ast.Package,
+	typeName string,
+) *ast.TypeSpec {
 	for _, file := range pkg.Files {
 		for _, obj := range file.Scope.Objects {
 			if obj.Kind != ast.Typ {
@@ -325,17 +368,46 @@ func findType(
 			if obj.Name != typeName {
 				continue
 			}
-			tp := obj.Decl.(*ast.TypeSpec).Type
-			if o, ok := tp.(*ast.StructType); ok {
-				return packageName, o, nil
-			}
-			return packageName, nil, fmt.Errorf(
-				"Error: Expected type %s to be a struct, "+
-					"but found it defined as another type.", typeName,
-			)
+			return obj.Decl.(*ast.TypeSpec)
 		}
 	}
-	return packageName, nil, nil
+	return nil
+}
+
+func traverseTypeIdents(
+	fset *token.FileSet,
+	pkg *ast.Package,
+	e ast.Expr, fn func(*ast.Ident),
+) {
+	switch t := e.(type) {
+	case *ast.ChanType, *ast.FuncType:
+	case *ast.StructType:
+		for _, f := range t.Fields.List {
+			traverseTypeIdents(fset, pkg, f.Type, fn)
+		}
+	case *ast.ArrayType:
+		traverseTypeIdents(fset, pkg, t.Elt, fn)
+	case *ast.MapType:
+		traverseTypeIdents(fset, pkg, t.Key, fn)
+		traverseTypeIdents(fset, pkg, t.Value, fn)
+	case *ast.Ident:
+		id := e.(*ast.Ident)
+		fn(id)
+		if x := findType(fset, pkg, id.Name); x != nil {
+			traverseTypeIdents(fset, pkg, x.Type, fn)
+		}
+	}
+}
+
+func isTypePrimitive(typeName string) bool {
+	switch typeName {
+	case "string", "bool", "byte", "rune", "uintptr",
+		"int", "int8", "int16", "int32", "int64",
+		"uint", "uint8", "uint16", "uint32", "uint64",
+		"float32", "float64", "complex64", "complex128":
+		return true
+	}
+	return false
 }
 
 // renderGoType converts an *ast.TypeSpec to Go code text.

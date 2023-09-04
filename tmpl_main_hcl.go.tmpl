@@ -8,8 +8,13 @@ import (
 	"github.com/hashicorp/hcl/v2/hclsimple"
 )
 
-var value {{.TypeDefinition}}
 var input = []byte(`{{.Input}}`)
+
+var value {{.RootTypeName}}
+
+{{range $v := .TypeDefinitions}}
+type {{$v}}
+{{end}}
 
 func main() {
 	if err := hclsimple.Decode("{{.InputFileName}}", input, nil, &value); err != nil {

@@ -8,8 +8,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var value {{.TypeDefinition}}
 var input = `{{.Input}}`
+
+var value {{.RootTypeName}}
+
+{{range $v := .TypeDefinitions}}
+type {{$v}}
+{{end}}
 
 func main() {
 	d := yaml.NewDecoder(strings.NewReader(input))

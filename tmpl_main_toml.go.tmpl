@@ -8,8 +8,13 @@ import (
 	"github.com/go-playground/validator/v10"
 )
 
-var value {{.TypeDefinition}}
 var input = `{{.Input}}`
+
+var value {{.RootTypeName}}
+
+{{range $v := .TypeDefinitions}}
+type {{$v}}
+{{end}}
 
 func main() {
 	d := toml.NewDecoder(strings.NewReader(input))
