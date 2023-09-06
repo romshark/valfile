@@ -3,6 +3,7 @@ module github.com/romshark/valfile
 go 1.21.0
 
 require (
+	github.com/fatih/structtag v1.2.0
 	github.com/google/go-jsonnet v0.20.0
 	github.com/joho/godotenv v1.5.1
 )

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/fatih/structtag"
 	"github.com/google/go-jsonnet"
 	"github.com/joho/godotenv"
 )
@@ -111,6 +112,9 @@ func main() {
 	typeName := flag.String("t", "", "type name")
 	inputFile := flag.String("f", "", "path to input file")
 	inputEnv := flag.Bool("env", false, "use environment variables as input")
+	noTagCheck := flag.Bool(
+		"no-tag-check", false, "disables check of marshaling tags if set",
+	)
 	flag.Parse()
 
 	switch {
@@ -139,9 +143,11 @@ func main() {
 		}
 	}
 
-	output, err := run(*packageDir, *typeName, *inputFile, inputType)
+	output, err := run(*packageDir, *typeName, *inputFile, inputType, !*noTagCheck)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		for _, err := range err {
+			fmt.Fprintln(os.Stderr, err.Error())
+		}
 		os.Exit(1)
 	}
 	if bytes.HasPrefix(output, []byte(StdoutErrPrefix)) {
@@ -154,17 +160,20 @@ func main() {
 func run(
 	packageDir, typeName, inputFile string,
 	inputType InputType,
-) (output []byte, err error) {
+	optCheckMarshalingTags bool,
+) (output []byte, errs []error) {
 	fset := token.NewFileSet()
 
 	pkg, err := parsePackage(fset, packageDir)
 	if err != nil {
-		return nil, err
+		return nil, []error{err}
 	}
 
 	rootType := findType(fset, pkg, typeName)
 	if rootType == nil {
-		return nil, fmt.Errorf("type %s not found in package %s", typeName, pkg.Name)
+		return nil, []error{fmt.Errorf(
+			"type %s not found in package %s", typeName, pkg.Name,
+		)}
 	}
 
 	typeStr, err := renderGoType(rootType, fset)
@@ -172,8 +181,8 @@ func run(
 		panic(fmt.Errorf("rendering go type: %w", err))
 	}
 	typeDefinitions := []string{typeStr}
-	registry := map[string]struct{}{
-		typeName: {},
+	typeSpecs := map[string]*ast.TypeSpec{
+		typeName: rootType,
 	}
 
 	traverseTypeIdents(fset, pkg, rootType.Type, func(i *ast.Ident) {
@@ -181,14 +190,14 @@ func run(
 			return
 		}
 		t := findType(fset, pkg, i.Name)
-		if _, ok := registry[t.Name.Name]; ok {
+		if _, ok := typeSpecs[t.Name.Name]; ok {
 			return
 		}
 		r, err := renderGoType(t, fset)
 		if err != nil {
 			panic(fmt.Errorf("rendering go type: %w", err))
 		}
-		registry[t.Name.Name] = struct{}{}
+		typeSpecs[t.Name.Name] = t
 		typeDefinitions = append(typeDefinitions, r)
 	})
 
@@ -196,103 +205,127 @@ func run(
 
 	// Write format-specific executable to temporary file
 	var source, goMod, goSum, vendorArchive []byte
+	var expectMarshalingTag string
 	switch inputType {
 	case InputTypeENV:
 		m := envToMap(os.Environ())
 		source = mustRenderSrcEnv(typeDefinitions, typeName, m)
 		goMod, goSum, vendorArchive = gomodENV, gosumENV, vendorENV
+		expectMarshalingTag = "env"
 	case InputTypeDOTENV:
 		f, err := os.OpenFile(inputFile, os.O_RDONLY, 0o644)
 		if err != nil {
-			return nil, fmt.Errorf("reading input file: %w", err)
+			return nil, []error{fmt.Errorf("reading input file: %w", err)}
 		}
 		m, err := godotenv.Parse(f)
 		if err != nil {
-			return nil, fmt.Errorf("parsing dotenv file: %w", err)
+			return nil, []error{fmt.Errorf("parsing dotenv file: %w", err)}
 		}
 		source = mustRenderSrcEnv(typeDefinitions, typeName, m)
 		goMod, goSum, vendorArchive = gomodENV, gosumENV, vendorENV
+		expectMarshalingTag = "env"
 	case InputTypeTOML:
 		inputFileContents, err := os.ReadFile(inputFile)
 		if err != nil {
-			return nil, fmt.Errorf("reading input file: %w", err)
+			return nil, []error{fmt.Errorf("reading input file: %w", err)}
 		}
 		source = mustRenderSrc(
 			typeDefinitions, typeName, string(inputFileContents), fileName, tmplTOML,
 		)
 		goMod, goSum, vendorArchive = gomodTOML, gosumTOML, vendorTOML
+		expectMarshalingTag = "toml"
 	case InputTypeJSON:
 		inputFileContents, err := os.ReadFile(inputFile)
 		if err != nil {
-			return nil, fmt.Errorf("reading input file: %w", err)
+			return nil, []error{fmt.Errorf("reading input file: %w", err)}
 		}
 		source = mustRenderSrc(
 			typeDefinitions, typeName, string(inputFileContents), fileName, tmplJSON,
 		)
 		goMod, goSum, vendorArchive = gomodJSON, gosumJSON, vendorJSON
+		expectMarshalingTag = "json"
 	case InputTypeYAML:
 		inputFileContents, err := os.ReadFile(inputFile)
 		if err != nil {
-			return nil, fmt.Errorf("reading input file: %w", err)
+			return nil, []error{fmt.Errorf("reading input file: %w", err)}
 		}
 		source = mustRenderSrc(
 			typeDefinitions, typeName, string(inputFileContents), fileName, tmplYAML,
 		)
 		goMod, goSum, vendorArchive = gomodYAML, gosumYAML, vendorYAML
+		expectMarshalingTag = "yaml"
 	case InputTypeJSONNET:
 		vm := jsonnet.MakeVM()
 		rendered, err := vm.EvaluateFile(inputFile)
 		if err != nil {
-			return nil, fmt.Errorf("evaluating Jsonnet: %w", err)
+			return nil, []error{fmt.Errorf("evaluating Jsonnet: %w", err)}
 		}
 		source = mustRenderSrc(
 			typeDefinitions, typeName, rendered, fileName, tmplJSON,
 		)
 		goMod, goSum, vendorArchive = gomodJSON, gosumJSON, vendorJSON
+		expectMarshalingTag = "json"
 	case InputTypeHCL:
 		inputFileContents, err := os.ReadFile(inputFile)
 		if err != nil {
-			return nil, fmt.Errorf("reading input file: %w", err)
+			return nil, []error{fmt.Errorf("reading input file: %w", err)}
 		}
 		source = mustRenderSrc(
 			typeDefinitions, typeName, string(inputFileContents), fileName, tmplHCL,
 		)
 		goMod, goSum, vendorArchive = gomodHCL, gosumHCL, vendorHCL
+		expectMarshalingTag = "hcl"
+	}
+
+	if optCheckMarshalingTags {
+		for _, k := range sortedKeys(typeSpecs) {
+			t := typeSpecs[k]
+			if err := checkMarshalingTags(t, expectMarshalingTag); err != nil {
+				errs = append(errs, err...)
+				continue
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return nil, errs
 	}
 
 	tempDir, err := os.MkdirTemp(os.TempDir(), "valfile-*")
 	if err != nil {
-		return nil, fmt.Errorf("creating temporary directory: %w", err)
+		return nil, []error{fmt.Errorf("creating temporary directory: %w", err)}
 	}
 	defer os.RemoveAll(tempDir)
 
 	{
 		p := filepath.Join(tempDir, "main.go")
 		if err = os.WriteFile(p, source, 0o644); err != nil {
-			return nil, fmt.Errorf("writing %s: %w", p, err)
+			return nil, []error{fmt.Errorf("writing %s: %w", p, err)}
 		}
 	}
 	{
 		p := filepath.Join(tempDir, "go.mod")
 		if err = os.WriteFile(p, goMod, 0o644); err != nil {
-			return nil, fmt.Errorf("writing %s: %w", p, err)
+			return nil, []error{fmt.Errorf("writing %s: %w", p, err)}
 		}
 	}
 	{
 		p := filepath.Join(tempDir, "go.sum")
 		if err = os.WriteFile(p, goSum, 0o644); err != nil {
-			return nil, fmt.Errorf("writing %s: %w", p, err)
+			return nil, []error{fmt.Errorf("writing %s: %w", p, err)}
 		}
 	}
 
 	if err = unzipArchive(vendorArchive, tempDir); err != nil {
-		return nil, fmt.Errorf("unzipping vendor directory: %w", err)
+		return nil, []error{fmt.Errorf("unzipping vendor directory: %w", err)}
 	}
 
 	// Compile and run the executable
 	cmd := exec.Command("go", "run", ".")
 	cmd.Dir = tempDir
-	return cmd.CombinedOutput()
+	if output, err = cmd.CombinedOutput(); err != nil {
+		return output, []error{err}
+	}
+	return output, nil
 }
 
 func mustRenderSrc(
@@ -372,6 +405,51 @@ func findType(
 		}
 	}
 	return nil
+}
+
+func checkMarshalingTags(t *ast.TypeSpec, expectTag string) (errs []error) {
+	s, ok := t.Type.(*ast.StructType)
+	if !ok {
+		return nil
+	}
+
+	for _, f := range s.Fields.List {
+		var fieldName string
+		if len(f.Names) > 0 {
+			fieldName = f.Names[0].Name
+		} else if id, ok := f.Type.(*ast.Ident); ok {
+			fieldName = id.Name
+		}
+		addErr := func(msg string, v ...any) {
+			errs = append(errs, fmt.Errorf(
+				"%s.%s: %s", t.Name.Name, fieldName, fmt.Sprintf(msg, v...),
+			))
+		}
+		if f.Tag == nil || f.Tag.Value == "" {
+			addErr("missing tag %q", expectTag)
+			continue
+		}
+		tagContent := f.Tag.Value[1 : len(f.Tag.Value)-1]
+		tags, err := structtag.Parse(tagContent)
+		if err != nil {
+			addErr("parsing struct tags")
+			continue
+		}
+		tag, err := tags.Get(expectTag)
+		if err != nil {
+			if err.Error() == "tag does not exist" {
+				addErr("missing tag %q", expectTag)
+				continue
+			}
+			addErr("getting tag %q: %v", expectTag, err)
+			continue
+		}
+		if tag.Name == "" {
+			addErr("tag %q is empty", expectTag)
+			continue
+		}
+	}
+	return errs
 }
 
 func traverseTypeIdents(
@@ -519,3 +597,11 @@ func getFileFormat(filePath string) (InputType, error) {
 }
 
 var regexEnvFile = regexp.MustCompile(`^\.env(\..+)?$`)
+
+func sortedKeys[K comparable, V any](m map[K]V) []K {
+	s := make([]K, 0, len(m))
+	for k := range m {
+		s = append(s, k)
+	}
+	return s
+}
