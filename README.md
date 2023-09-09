@@ -18,6 +18,26 @@ valfile -p path/to/yourpackage -t YourStructType -f input-file.toml
 If `input-file.toml` passes the marshaling and validation then
 the above command is a no-op.
 
+### Struct tag check
+
+By default, valfile will return errors if any of the fields of the selected type
+don't have a tag corresponding to the input type, for example:
+
+```go
+struct S struct {
+    Foo string `json:"foo"`
+    Bar string
+}
+```
+
+The above type in combination with a JSON input file will produce:
+
+```sh
+Config.Bar: missing tag "json"
+```
+
+option `-no-tag-check` disables this check.
+
 ### Environment variables
 
 To match environment variables against a Go type, use the `-env` flag.
