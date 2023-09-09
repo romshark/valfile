@@ -14,15 +14,77 @@ func TestCLI(t *testing.T) {
 	for _, td := range []Test{
 		// CLI Parameters
 		{
-			Name: "err_missing_type",
-			Args: "-p $SETUP/tstcmd -env",
+			Name:    "err_missing_type",
+			Args:    "-p $SETUP/tstcmd -env",
+			EnvVars: []string{"FOO=bar"},
 			Files: map[string]string{
 				"tstcmd/main.go": `
-					package main
-					type Config struct { Foo "json:\"bar\"" }
+					package main; type Config struct { Foo "env:\"FOO\"" }
 				`,
 			},
 			ExpectErrs: []string{"missing type name"},
+		},
+		{
+			Name:    "err_missing_tag_env",
+			Args:    "-p $SETUP/tstcmd -t Config -env",
+			EnvVars: []string{"FOO=bar"},
+			Files: map[string]string{
+				"tstcmd/main.go": `package main; type Config struct { Foo string }`,
+			},
+			ExpectErrs: []string{`Config.Foo: missing tag "env"`},
+		},
+		{
+			Name:    "err_missing_tag_json",
+			Args:    "-p $SETUP/tstcmd -t Config -f $SETUP/input.json",
+			EnvVars: []string{"FOO=bar"},
+			Files: map[string]string{
+				"input.json":     `{"foo":"bar"}`,
+				"tstcmd/main.go": `package main; type Config struct { Foo string }`,
+			},
+			ExpectErrs: []string{`Config.Foo: missing tag "json"`},
+		},
+		{
+			Name:    "err_missing_tag_toml",
+			Args:    "-p $SETUP/tstcmd -t Config -f $SETUP/input.toml",
+			EnvVars: []string{`foo="bar"`},
+			Files: map[string]string{
+				"input.toml":     `{"foo":"bar"}`,
+				"tstcmd/main.go": `package main; type Config struct { Foo string }`,
+			},
+			ExpectErrs: []string{`Config.Foo: missing tag "toml"`},
+		},
+		{
+			Name:    "err_missing_tag_jsonnet",
+			Args:    "-p $SETUP/tstcmd -t Config -f $SETUP/input.jsonnet",
+			EnvVars: []string{`{foo:"bar"}`},
+			Files: map[string]string{
+				"input.jsonnet":  `{"foo":"bar"}`,
+				"tstcmd/main.go": `package main; type Config struct { Foo string }`,
+			},
+			ExpectErrs: []string{`Config.Foo: missing tag "json"`},
+		},
+		{
+			Name:    "err_missing_tag_hcl",
+			Args:    "-p $SETUP/tstcmd -t Config -f $SETUP/input.hcl",
+			EnvVars: []string{`{foo:"bar"}`},
+			Files: map[string]string{
+				"input.hcl":      `foo="bar"`,
+				"tstcmd/main.go": `package main; type Config struct { Foo string }`,
+			},
+			ExpectErrs: []string{`Config.Foo: missing tag "hcl"`},
+		},
+
+		// Unknown fields
+		{
+			Name: "err_json_unknown_field",
+			Args: "-p $SETUP/tstcmd -t Config -f $SETUP/input.json",
+			Files: map[string]string{
+				"input.json": `{"bar":"baz"}`,
+				"tstcmd/main.go": `
+					package main; type Config struct { Foo string "json:\"baz\"" }
+				`,
+			},
+			ExpectErrs: []string{`json: unknown field "bar"`},
 		},
 
 		// Success
@@ -32,8 +94,7 @@ func TestCLI(t *testing.T) {
 			EnvVars: []string{"FOO=bar"},
 			Files: map[string]string{
 				"tstcmd/main.go": `
-					package main
-					type Config struct { Foo string "env:\"foo\"" }
+					package main; type Config struct { Foo string "env:\"foo\"" }
 				`,
 			},
 		},
@@ -43,8 +104,7 @@ func TestCLI(t *testing.T) {
 			Files: map[string]string{
 				"input.json": `{"foo":"bar"}`,
 				"tstcmd/main.go": `
-					package main
-					type Config struct { Foo string "json:\"foo\"" }
+					package main; type Config struct { Foo string "json:\"foo\"" }
 				`,
 			},
 		},
@@ -52,30 +112,32 @@ func TestCLI(t *testing.T) {
 			Name: "toml",
 			Args: "-p $SETUP/tstcmd -t Config -f $SETUP/input.toml",
 			Files: map[string]string{
-				"input.toml": `foo = "bar"`,
+				"input.toml": `foo="bar"`,
 				"tstcmd/main.go": `
-					package main
-					type Config struct { Foo string "toml:\"foo\"" }
+					package main; type Config struct { Foo string "toml:\"foo\"" }
 				`,
 			},
 		},
-
-		// Format: JSON
 		{
-			Name: "err_unmarshaling_json_unknown_field",
-			Args: "-p $SETUP/tstcmd -t Config -f $SETUP/input.json",
+			Name: "jsonnet",
+			Args: "-p $SETUP/tstcmd -t Config -f $SETUP/input.jsonnet",
 			Files: map[string]string{
-				"input.json": `{"bar":"baz"}`,
+				"input.jsonnet": `{foo:"bar"}`,
 				"tstcmd/main.go": `
-					package main
-					type Config struct { Foo string "json:\"baz\"" }
+					package main; type Config struct { Foo string "json:\"foo\"" }
 				`,
 			},
-			ExpectErrs: []string{`json: unknown field "bar"`},
 		},
-
-		// Format: TOML
-
+		{
+			Name: "hcl",
+			Args: "-p $SETUP/tstcmd -t Config -f $SETUP/input.hcl",
+			Files: map[string]string{
+				"input.hcl": `foo="bar"`,
+				"tstcmd/main.go": `
+					package main; type Config struct { Foo string "hcl:\"foo\"" }
+				`,
+			},
+		},
 	} {
 		t.Run(td.Name, func(t *testing.T) {
 			td.validateName(t)
