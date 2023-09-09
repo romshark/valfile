@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	_ "embed"
+	"errors"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -108,224 +110,251 @@ func withTmpl(name, src string, t ...*template.Template) *template.Template {
 const StdoutErrPrefix = "VALFILE: "
 
 func main() {
-	packageDir := flag.String("p", ".", "package directory path")
-	typeName := flag.String("t", "", "type name")
-	inputFile := flag.String("f", "", "path to input file")
-	inputEnv := flag.Bool("env", false, "use environment variables as input")
-	noTagCheck := flag.Bool(
-		"no-tag-check", false, "disables check of marshaling tags if set",
-	)
-	flag.Parse()
-
-	switch {
-	case *packageDir == "":
-		fmt.Fprintln(os.Stderr, "missing package directory")
-		os.Exit(1)
-	case *typeName == "":
-		fmt.Fprintln(os.Stderr, "missing type name")
-		os.Exit(1)
-	case !*inputEnv && *inputFile == "":
-		fmt.Fprintln(os.Stderr, "missing input file")
-		os.Exit(1)
-	case *inputEnv && *inputFile != "":
-		fmt.Fprintln(os.Stderr, "conflicting parameters, "+
-			"-env and -f are mutually exlusive. "+
-			"Please use either the -env option or the -f option, but not both.")
-	}
-
-	inputType := InputTypeENV
-	if !*inputEnv {
-		var err error
-		inputType, err = getFileFormat(*inputFile)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err.Error())
-			os.Exit(1)
+	if errs := run(os.Args, os.TempDir, os.Environ); len(errs) > 0 {
+		for _, err := range errs {
+			fmt.Fprintln(os.Stdout, err.Error())
 		}
-	}
-
-	output, err := run(*packageDir, *typeName, *inputFile, inputType, !*noTagCheck)
-	if err != nil {
-		for _, err := range err {
-			fmt.Fprintln(os.Stderr, err.Error())
-		}
-		os.Exit(1)
-	}
-	if bytes.HasPrefix(output, []byte(StdoutErrPrefix)) {
-		msg := output[len(StdoutErrPrefix):]
-		_, _ = os.Stdout.Write(msg)
 		os.Exit(1)
 	}
 }
 
 func run(
-	packageDir, typeName, inputFile string,
-	inputType InputType,
-	optCheckMarshalingTags bool,
-) (output []byte, errs []error) {
-	fset := token.NewFileSet()
-
-	pkg, err := parsePackage(fset, packageDir)
+	args []string,
+	makeTmpDir func() string,
+	envVars func() []string,
+) (errs []error) {
+	p, err := parseCLIParameters(args)
 	if err != nil {
-		return nil, []error{err}
+		return []error{err}
 	}
 
-	rootType := findType(fset, pkg, typeName)
+	inputType := InputTypeENV
+	if !p.InputEnv {
+		var err error
+		inputType, err = getFileFormat(p.InputFile)
+		if err != nil {
+			return []error{err}
+		}
+	}
+
+	fset := token.NewFileSet()
+
+	pkg, err := parsePackage(fset, p.PackageDir)
+	if err != nil {
+		return []error{err}
+	}
+
+	rootType := findType(fset, pkg, p.TypeName)
 	if rootType == nil {
-		return nil, []error{fmt.Errorf(
-			"type %s not found in package %s", typeName, pkg.Name,
-		)}
+		return []error{
+			fmt.Errorf("type %s not found in package %s\n", p.TypeName, pkg.Name),
+		}
 	}
 
 	typeStr, err := renderGoType(rootType, fset)
 	if err != nil {
-		panic(fmt.Errorf("rendering go type: %w", err))
+		return []error{fmt.Errorf("rendering go type: %w", err)}
 	}
 	typeDefinitions := []string{typeStr}
 	typeSpecs := map[string]*ast.TypeSpec{
-		typeName: rootType,
+		p.TypeName: rootType,
 	}
 
-	traverseTypeIdents(fset, pkg, rootType.Type, func(i *ast.Ident) {
+	traverseTypeIdents(fset, pkg, rootType.Type, func(i *ast.Ident) bool {
 		if isTypePrimitive(i.Name) {
-			return
+			return false
 		}
 		t := findType(fset, pkg, i.Name)
+		if t == nil {
+			errs = append(errs, fmt.Errorf("undefined type: %s", i.Name))
+			return true
+		}
 		if _, ok := typeSpecs[t.Name.Name]; ok {
-			return
+			return false
 		}
 		r, err := renderGoType(t, fset)
 		if err != nil {
-			panic(fmt.Errorf("rendering go type: %w", err))
+			errs = append(errs, fmt.Errorf("rendering go type: %w", err))
+			return true
 		}
 		typeSpecs[t.Name.Name] = t
 		typeDefinitions = append(typeDefinitions, r)
+		return false
 	})
+	if errs != nil {
+		return errs
+	}
 
-	fileName := filepath.Base(inputFile)
+	fileName := filepath.Base(p.InputFile)
 
 	// Write format-specific executable to temporary file
 	var source, goMod, goSum, vendorArchive []byte
 	var expectMarshalingTag string
 	switch inputType {
 	case InputTypeENV:
-		m := envToMap(os.Environ())
-		source = mustRenderSrcEnv(typeDefinitions, typeName, m)
+		m := envToMap(envVars())
+		source = mustRenderSrcEnv(typeDefinitions, p.TypeName, m)
 		goMod, goSum, vendorArchive = gomodENV, gosumENV, vendorENV
 		expectMarshalingTag = "env"
 	case InputTypeDOTENV:
-		f, err := os.OpenFile(inputFile, os.O_RDONLY, 0o644)
+		f, err := os.OpenFile(p.InputFile, os.O_RDONLY, 0o644)
 		if err != nil {
-			return nil, []error{fmt.Errorf("reading input file: %w", err)}
+			return []error{fmt.Errorf("reading input file: %w", err)}
 		}
 		m, err := godotenv.Parse(f)
 		if err != nil {
-			return nil, []error{fmt.Errorf("parsing dotenv file: %w", err)}
+			return []error{fmt.Errorf("parsing dotenv file: %w", err)}
 		}
-		source = mustRenderSrcEnv(typeDefinitions, typeName, m)
+		source = mustRenderSrcEnv(typeDefinitions, p.TypeName, m)
 		goMod, goSum, vendorArchive = gomodENV, gosumENV, vendorENV
 		expectMarshalingTag = "env"
 	case InputTypeTOML:
-		inputFileContents, err := os.ReadFile(inputFile)
+		inputFileContents, err := os.ReadFile(p.InputFile)
 		if err != nil {
-			return nil, []error{fmt.Errorf("reading input file: %w", err)}
+			return []error{fmt.Errorf("reading input file: %w", err)}
 		}
 		source = mustRenderSrc(
-			typeDefinitions, typeName, string(inputFileContents), fileName, tmplTOML,
+			typeDefinitions, p.TypeName, string(inputFileContents), fileName, tmplTOML,
 		)
 		goMod, goSum, vendorArchive = gomodTOML, gosumTOML, vendorTOML
 		expectMarshalingTag = "toml"
 	case InputTypeJSON:
-		inputFileContents, err := os.ReadFile(inputFile)
+		inputFileContents, err := os.ReadFile(p.InputFile)
 		if err != nil {
-			return nil, []error{fmt.Errorf("reading input file: %w", err)}
+			return []error{fmt.Errorf("reading input file: %w", err)}
 		}
 		source = mustRenderSrc(
-			typeDefinitions, typeName, string(inputFileContents), fileName, tmplJSON,
+			typeDefinitions, p.TypeName, string(inputFileContents), fileName, tmplJSON,
 		)
 		goMod, goSum, vendorArchive = gomodJSON, gosumJSON, vendorJSON
 		expectMarshalingTag = "json"
 	case InputTypeYAML:
-		inputFileContents, err := os.ReadFile(inputFile)
+		inputFileContents, err := os.ReadFile(p.InputFile)
 		if err != nil {
-			return nil, []error{fmt.Errorf("reading input file: %w", err)}
+			return []error{fmt.Errorf("reading input file: %w", err)}
 		}
 		source = mustRenderSrc(
-			typeDefinitions, typeName, string(inputFileContents), fileName, tmplYAML,
+			typeDefinitions, p.TypeName, string(inputFileContents), fileName, tmplYAML,
 		)
 		goMod, goSum, vendorArchive = gomodYAML, gosumYAML, vendorYAML
 		expectMarshalingTag = "yaml"
 	case InputTypeJSONNET:
 		vm := jsonnet.MakeVM()
-		rendered, err := vm.EvaluateFile(inputFile)
+		rendered, err := vm.EvaluateFile(p.InputFile)
 		if err != nil {
-			return nil, []error{fmt.Errorf("evaluating Jsonnet: %w", err)}
+			return []error{fmt.Errorf("evaluating Jsonnet: %w", err)}
 		}
 		source = mustRenderSrc(
-			typeDefinitions, typeName, rendered, fileName, tmplJSON,
+			typeDefinitions, p.TypeName, rendered, fileName, tmplJSON,
 		)
 		goMod, goSum, vendorArchive = gomodJSON, gosumJSON, vendorJSON
 		expectMarshalingTag = "json"
 	case InputTypeHCL:
-		inputFileContents, err := os.ReadFile(inputFile)
+		inputFileContents, err := os.ReadFile(p.InputFile)
 		if err != nil {
-			return nil, []error{fmt.Errorf("reading input file: %w", err)}
+			return []error{fmt.Errorf("reading input file: %w", err)}
 		}
 		source = mustRenderSrc(
-			typeDefinitions, typeName, string(inputFileContents), fileName, tmplHCL,
+			typeDefinitions, p.TypeName, string(inputFileContents), fileName, tmplHCL,
 		)
 		goMod, goSum, vendorArchive = gomodHCL, gosumHCL, vendorHCL
 		expectMarshalingTag = "hcl"
 	}
 
-	if optCheckMarshalingTags {
+	if !p.NoTagCheck {
 		for _, k := range sortedKeys(typeSpecs) {
 			t := typeSpecs[k]
-			if err := checkMarshalingTags(t, expectMarshalingTag); err != nil {
+			if err := checkMarshalingTags(t, expectMarshalingTag); len(err) > 0 {
 				errs = append(errs, err...)
-				continue
 			}
 		}
-	}
-	if len(errs) > 0 {
-		return nil, errs
+		if errs != nil {
+			return errs
+		}
 	}
 
-	tempDir, err := os.MkdirTemp(os.TempDir(), "valfile-*")
+	tempDir, err := os.MkdirTemp(makeTmpDir(), "valfile-*")
 	if err != nil {
-		return nil, []error{fmt.Errorf("creating temporary directory: %w", err)}
+		return []error{fmt.Errorf("creating temporary directory: %w", err)}
 	}
 	defer os.RemoveAll(tempDir)
 
 	{
 		p := filepath.Join(tempDir, "main.go")
 		if err = os.WriteFile(p, source, 0o644); err != nil {
-			return nil, []error{fmt.Errorf("writing %s: %w", p, err)}
+			return []error{fmt.Errorf("writing %s: %w", p, err)}
 		}
 	}
 	{
 		p := filepath.Join(tempDir, "go.mod")
 		if err = os.WriteFile(p, goMod, 0o644); err != nil {
-			return nil, []error{fmt.Errorf("writing %s: %w", p, err)}
+			return []error{fmt.Errorf("writing %s: %w", p, err)}
 		}
 	}
 	{
 		p := filepath.Join(tempDir, "go.sum")
 		if err = os.WriteFile(p, goSum, 0o644); err != nil {
-			return nil, []error{fmt.Errorf("writing %s: %w", p, err)}
+			return []error{fmt.Errorf("writing %s: %w", p, err)}
 		}
 	}
 
 	if err = unzipArchive(vendorArchive, tempDir); err != nil {
-		return nil, []error{fmt.Errorf("unzipping vendor directory: %w", err)}
+		return []error{fmt.Errorf("unzipping vendor directory: %w", err)}
 	}
 
 	// Compile and run the executable
 	cmd := exec.Command("go", "run", ".")
 	cmd.Dir = tempDir
-	if output, err = cmd.CombinedOutput(); err != nil {
-		return output, []error{err}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return []error{err}
 	}
-	return output, nil
+	output = bytes.TrimRight(output, "\n")
+
+	if bytes.HasPrefix(output, []byte(StdoutErrPrefix)) {
+		msg := output[len(StdoutErrPrefix):]
+		return []error{errors.New(string(msg))}
+	}
+	return nil
+}
+
+type Params struct {
+	PackageDir string
+	TypeName   string
+	InputFile  string
+	InputEnv   bool
+	NoTagCheck bool
+}
+
+func parseCLIParameters(args []string) (Params, error) {
+	var params Params
+	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	f.StringVar(&params.PackageDir, "p", ".", "package directory path")
+	f.StringVar(&params.TypeName, "t", "", "type name")
+	f.StringVar(&params.InputFile, "f", "", "path to input file")
+	f.BoolVar(&params.InputEnv, "env", false, "use environment variables as input")
+	f.BoolVar(
+		&params.NoTagCheck,
+		"no-tag-check", false, "disables check of marshaling tags if set",
+	)
+	if err := f.Parse(args[1:]); err != nil {
+		return Params{}, err
+	}
+
+	switch {
+	case params.PackageDir == "":
+		return Params{}, errors.New("missing package directory")
+	case params.TypeName == "":
+		return Params{}, errors.New("missing type name")
+	case !params.InputEnv && params.InputFile == "":
+		return Params{}, errors.New("missing input file")
+	case params.InputEnv && params.InputFile != "":
+		return Params{}, errors.New("conflicting parameters, " +
+			"-env and -f are mutually exlusive. " +
+			"Please use either the -env option or the -f option, but not both.")
+	}
+
+	return params, nil
 }
 
 func mustRenderSrc(
@@ -420,32 +449,37 @@ func checkMarshalingTags(t *ast.TypeSpec, expectTag string) (errs []error) {
 		} else if id, ok := f.Type.(*ast.Ident); ok {
 			fieldName = id.Name
 		}
-		addErr := func(msg string, v ...any) {
+		addErrf := func(msg string, v ...any) {
 			errs = append(errs, fmt.Errorf(
 				"%s.%s: %s", t.Name.Name, fieldName, fmt.Sprintf(msg, v...),
 			))
 		}
 		if f.Tag == nil || f.Tag.Value == "" {
-			addErr("missing tag %q", expectTag)
+			addErrf("missing tag %q", expectTag)
 			continue
 		}
-		tagContent := f.Tag.Value[1 : len(f.Tag.Value)-1]
+
+		tagContent, err := strconv.Unquote(f.Tag.Value)
+		if err != nil {
+			addErrf("unquoting tag: %v", err)
+		}
+
 		tags, err := structtag.Parse(tagContent)
 		if err != nil {
-			addErr("parsing struct tags")
+			addErrf("parsing struct tags: %v", err)
 			continue
 		}
 		tag, err := tags.Get(expectTag)
 		if err != nil {
 			if err.Error() == "tag does not exist" {
-				addErr("missing tag %q", expectTag)
+				addErrf("missing tag %q", expectTag)
 				continue
 			}
-			addErr("getting tag %q: %v", expectTag, err)
+			addErrf("getting tag %q: %v", expectTag, err)
 			continue
 		}
 		if tag.Name == "" {
-			addErr("tag %q is empty", expectTag)
+			addErrf("tag %q is empty", expectTag)
 			continue
 		}
 	}
@@ -455,7 +489,8 @@ func checkMarshalingTags(t *ast.TypeSpec, expectTag string) (errs []error) {
 func traverseTypeIdents(
 	fset *token.FileSet,
 	pkg *ast.Package,
-	e ast.Expr, fn func(*ast.Ident),
+	e ast.Expr,
+	fn func(*ast.Ident) (stop bool),
 ) {
 	switch t := e.(type) {
 	case *ast.ChanType, *ast.FuncType:
@@ -470,7 +505,9 @@ func traverseTypeIdents(
 		traverseTypeIdents(fset, pkg, t.Value, fn)
 	case *ast.Ident:
 		id := e.(*ast.Ident)
-		fn(id)
+		if fn(id) {
+			return
+		}
 		if x := findType(fset, pkg, id.Name); x != nil {
 			traverseTypeIdents(fset, pkg, x.Type, fn)
 		}
