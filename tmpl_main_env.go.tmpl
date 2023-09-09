@@ -8,12 +8,17 @@ import (
 	"github.com/go-playground/validator/v10"
 )
 
-var value {{.TypeDefinition}}
 var input = map[string]string {
 {{- range $key, $value := .Input}}
    `{{$key}}`: `{{$value}}`,
 {{ end -}}
 }
+
+var value {{.RootTypeName}}
+
+{{range $v := .TypeDefinitions}}
+type {{$v}}
+{{end}}
 
 func main() {
 	if err := env.ParseWithOptions(&value, env.Options{
